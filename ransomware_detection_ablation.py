@@ -9,9 +9,10 @@ This script performs ransomware detection using various combinations of:
 1. Static features only
 2. Dynamic features only
 3. Static + VexIR embeddings
-4. Dynamic + VexIR embeddings
-5. Static + Dynamic features
-6. Static + Dynamic + VexIR embeddings
+4. VexIR embeddings only
+5. Dynamic + VexIR embeddings
+6. Static + Dynamic features
+7. Static + Dynamic + VexIR embeddings
 
 All datasets are aligned by file hash to ensure consistency (50 benign + 50 ransomware files).
 """
@@ -238,7 +239,7 @@ def load_and_align_datasets():
 
 def create_feature_combinations(df_static, df_dynamic, df_static_vexir):
     """
-    Create all 6 feature combinations for ablation study.
+    Create all 7 feature combinations for ablation study.
     Returns dictionary with dataset name as key and (features, labels) as value.
     """
     
@@ -315,45 +316,55 @@ def create_feature_combinations(df_static, df_dynamic, df_static_vexir):
     }
     print(f"3. Static + VexIR: {df_3.shape}")
     
-    # 4. Dynamic + VexIR Embeddings
-    df_4 = pd.concat([
+    # 4. VexIR Only
+    df_4 = df_static_vexir[vexir_cols].copy()
+    datasets['vexir_only'] = {
+        'features': df_4,
+        'labels': labels,
+        'hashes': file_hashes,
+        'feature_names': vexir_cols
+    }
+    print(f"4. VexIR Only: {df_4.shape}")
+    
+    # 5. Dynamic + VexIR Embeddings
+    df_5 = pd.concat([
         df_dynamic[dynamic_cols].reset_index(drop=True),
         df_static_vexir[vexir_cols].reset_index(drop=True)
     ], axis=1)
     datasets['dynamic_vexir'] = {
-        'features': df_4,
+        'features': df_5,
         'labels': labels,
         'hashes': file_hashes,
         'feature_names': dynamic_cols + vexir_cols
     }
-    print(f"4. Dynamic + VexIR: {df_4.shape}")
+    print(f"5. Dynamic + VexIR: {df_5.shape}")
     
-    # 5. Static + Dynamic Features
-    df_5 = pd.concat([
+    # 6. Static + Dynamic Features
+    df_6 = pd.concat([
         df_static[static_cols].reset_index(drop=True),
         df_dynamic[dynamic_cols].reset_index(drop=True)
     ], axis=1)
     datasets['static_dynamic'] = {
-        'features': df_5,
+        'features': df_6,
         'labels': labels,
         'hashes': file_hashes,
         'feature_names': static_cols + dynamic_cols
     }
-    print(f"5. Static + Dynamic: {df_5.shape}")
+    print(f"6. Static + Dynamic: {df_6.shape}")
     
-    # 6. Static + Dynamic + VexIR Embeddings
-    df_6 = pd.concat([
+    # 7. Static + Dynamic + VexIR Embeddings
+    df_7 = pd.concat([
         df_static[static_cols].reset_index(drop=True),
         df_dynamic[dynamic_cols].reset_index(drop=True),
         df_static_vexir[vexir_cols].reset_index(drop=True)
     ], axis=1)
     datasets['static_dynamic_vexir'] = {
-        'features': df_6,
+        'features': df_7,
         'labels': labels,
         'hashes': file_hashes,
         'feature_names': static_cols + dynamic_cols + vexir_cols
     }
-    print(f"6. Static + Dynamic + VexIR: {df_6.shape}")
+    print(f"7. Static + Dynamic + VexIR: {df_7.shape}")
     
     return datasets
 
@@ -384,6 +395,7 @@ def run_experiment(datasets):
         'static_only',
         'dynamic_only', 
         'static_vexir',
+        'vexir_only',
         'dynamic_vexir',
         'static_dynamic',
         'static_dynamic_vexir'
@@ -393,6 +405,7 @@ def run_experiment(datasets):
         'static_only': 'Static Features Only',
         'dynamic_only': 'Dynamic Features Only',
         'static_vexir': 'Static + VexIR',
+        'vexir_only': 'VexIR Only',
         'dynamic_vexir': 'Dynamic + VexIR',
         'static_dynamic': 'Static + Dynamic',
         'static_dynamic_vexir': 'Static + Dynamic + VexIR'
@@ -562,9 +575,10 @@ def generate_summary(df_results):
         'static_only': '1. Static Features Only',
         'dynamic_only': '2. Dynamic Features Only',
         'static_vexir': '3. Static + VexIR',
-        'dynamic_vexir': '4. Dynamic + VexIR',
-        'static_dynamic': '5. Static + Dynamic',
-        'static_dynamic_vexir': '6. Static + Dynamic + VexIR'
+        'vexir_only': '4. VexIR Only',
+        'dynamic_vexir': '5. Dynamic + VexIR',
+        'static_dynamic': '6. Static + Dynamic',
+        'static_dynamic_vexir': '7. Static + Dynamic + VexIR'
     }
     
     for dataset in summary['dataset'].unique():
@@ -597,13 +611,14 @@ def main():
     print("="*80)
     print("RANSOMWARE DETECTION IN ELF FILES - ABLATION STUDY")
     print("="*80)
-    print("\nThis experiment evaluates multiple ML models on 6 feature combinations:")
+    print("\nThis experiment evaluates multiple ML models on 7 feature combinations:")
     print("1. Static Features Only")
     print("2. Dynamic Features Only")
     print("3. Static + VexIR Embeddings")
-    print("4. Dynamic + VexIR Embeddings")
-    print("5. Static + Dynamic Features")
-    print("6. Static + Dynamic + VexIR Embeddings")
+    print("4. VexIR Embeddings Only")
+    print("5. Dynamic + VexIR Embeddings")
+    print("6. Static + Dynamic Features")
+    print("7. Static + Dynamic + VexIR Embeddings")
     print("\n")
     
     # Step 1: Load and align datasets
