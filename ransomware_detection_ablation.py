@@ -14,7 +14,7 @@ This script performs ransomware detection using various combinations of:
 6. Static + Dynamic features
 7. Static + Dynamic + VexIR embeddings
 
-Each combination is evaluated with VexIR embeddings of dimensions: 128, 64, 32, 16, 8
+Each combination is evaluated with VexIR embeddings of dimensions: 512, 256, 128, 64, 32, 16, 8
 
 Dataset Alignment:
 - All datasets are explicitly aligned by file_hash column
@@ -133,7 +133,6 @@ def select_algorithm(algorithm):
 def load_datasets(vexir_dim=128):
     """
     Load all CSV files for the specified VexIR embedding dimension.
-    Each dimension has its own static/dynamic datasets for realistic variance.
     
     CRITICAL: This function performs proper dataset alignment by file_hash:
     1. Finds intersection of hashes across all three datasets
@@ -142,7 +141,7 @@ def load_datasets(vexir_dim=128):
     4. Verifies alignment with assertions
     
     Args:
-        vexir_dim: Dimension of VexIR embeddings (128, 64, 32, 16, or 8)
+        vexir_dim: Dimension of VexIR embeddings (512, 256, 128, 64, 32, 16, or 8)
     
     Returns:
         df_static: Static features DataFrame (aligned)
@@ -151,7 +150,6 @@ def load_datasets(vexir_dim=128):
     """
     print(f"\nLoading datasets (VexIR dim={vexir_dim})...")
     
-    # Load dimension-specific datasets
     df_static = pd.read_csv(f"static_features_{vexir_dim}.csv")
     print(f"  Static features loaded: {df_static.shape}")
     
@@ -322,12 +320,6 @@ def run_experiment(datasets, vexir_dim=128):
     """
     Run ML experiments on all dataset combinations with all algorithms.
     Uses nested cross-validation with GridSearchCV for hyperparameter tuning.
-    
-    Note on StandardScaler: Applied uniformly across all models for consistency.
-    Tree-based models (RF, XGB, DT) don't require scaling but it doesn't harm them.
-    
-    Note on DNN with small samples: Included for comparative benchmarking across
-    model families, though results should be interpreted with caution for ~100 samples.
     """
     
     df_results = pd.DataFrame(columns=[
@@ -545,11 +537,11 @@ def main():
     print("  5. Dynamic + VexIR Embeddings")
     print("  6. Static + Dynamic Features")
     print("  7. Static + Dynamic + VexIR Embeddings")
-    print("\nVexIR embedding dimensions: 128, 64, 32, 16, 8")
+    print("\nVexIR embedding dimensions: 512, 256, 128, 64, 32, 16, 8")
     print("\nClassifiers: XGB, RF, LR, DT, NB, SVM, DNN, KNN")
     print("\n")
     
-    vexir_dimensions = [128, 64, 32, 16, 8]
+    vexir_dimensions = [512, 256, 128, 64, 32, 16, 8]
     
     all_results = None
     all_feature_imp = None
