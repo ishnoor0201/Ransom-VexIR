@@ -575,9 +575,6 @@ def main():
     # Save all results
     all_results.to_csv("ransomware_detection_results.csv", index=False)
     
-    if all_feature_imp is not None:
-        all_feature_imp.to_csv("ransomware_feature_importance.csv", index=False)
-    
     # Generate summary
     summary = generate_summary(all_results)
     
@@ -587,7 +584,6 @@ def main():
     print("\nOutput files:")
     print("  - ransomware_detection_results.csv (detailed results)")
     print("  - ransomware_detection_summary.csv (summary statistics)")
-    print("  - ransomware_feature_importance.csv (feature importance)")
     
     return all_results, summary
 
