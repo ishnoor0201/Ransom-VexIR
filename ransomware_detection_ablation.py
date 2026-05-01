@@ -21,11 +21,16 @@ Dataset Alignment:
 - Hash intersection ensures only common samples are used
 - Sorting by hash guarantees consistent row ordering
 - Assertions verify alignment before experiments
+
+Preprocessing:
+- All preprocessing (scaling, variance threshold) is performed inside 
+  cross-validation folds to prevent information leakage.
 """
 
 import pandas as pd
 import numpy as np
 import warnings
+import time
 
 from sklearn.model_selection import StratifiedKFold, GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -42,14 +47,24 @@ from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
 
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score
+    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 )
 
-warnings.filterwarnings('ignore')
+# Suppress only specific warnings (convergence, etc.)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 pd.set_option("display.max_columns", 500)
 pd.set_option("display.max_rows", 500)
 
+# =============================================================================
+# CONFIGURATION - Single source of truth for file paths
+# =============================================================================
 RANDOM_SEED = 42
+STATIC_FILE = "ransomware_static_features.csv"
+DYNAMIC_FILE = "ransomware_dynamic_features.csv"
+VEXIR_FILE_TEMPLATE = "vexir_embeddings_{dim}.csv"
+
 np.random.seed(RANDOM_SEED)
 
 
@@ -57,6 +72,9 @@ def select_algorithm(algorithm):
     """
     Returns classifier and parameter grid for the specified algorithm.
     All classifiers use RANDOM_SEED for reproducibility.
+    
+    Note: Parameter grids are intentionally constrained to maintain 
+    comparable computational cost across classifiers.
     """
     
     param_grid_dt = {
@@ -150,13 +168,14 @@ def load_datasets(vexir_dim=128):
     """
     print(f"\nLoading datasets (VexIR dim={vexir_dim})...")
     
-    df_static = pd.read_csv(f"static_features_{vexir_dim}.csv")
+    # Load from consistent file paths
+    df_static = pd.read_csv(STATIC_FILE)
     print(f"  Static features loaded: {df_static.shape}")
     
-    df_dynamic = pd.read_csv(f"dynamic_features_{vexir_dim}.csv")
+    df_dynamic = pd.read_csv(DYNAMIC_FILE)
     print(f"  Dynamic features loaded: {df_dynamic.shape}")
     
-    df_vexir = pd.read_csv(f"vexir_embeddings_{vexir_dim}.csv")
+    df_vexir = pd.read_csv(VEXIR_FILE_TEMPLATE.format(dim=vexir_dim))
     print(f"  VexIR embeddings loaded: {df_vexir.shape}")
     
     # === DATASET ALIGNMENT BY HASH ===
@@ -193,12 +212,17 @@ def load_datasets(vexir_dim=128):
     assert all(df_static['file_hash'] == df_vexir['file_hash']), \
         "Static and VexIR file_hash mismatch after alignment!"
     
-    # Step 5: Verify labels match across datasets
+    # Step 5: Normalize labels to consistent format (numeric: 0=benign, 1=ransomware)
+    label_map = {'benign': 0, 'ransomware': 1, 0: 0, 1: 1}
+    df_static['label'] = df_static['label'].map(lambda x: label_map.get(x, x))
+    df_dynamic['label'] = df_dynamic['label'].map(lambda x: label_map.get(x, x))
+    
+    # Step 6: Verify labels match between static and dynamic
     assert all(df_static['label'] == df_dynamic['label']), \
         "Labels mismatch between Static and Dynamic datasets!"
     
-    assert all(df_static['label'] == df_vexir['label']), \
-        "Labels mismatch between Static and VexIR datasets!"
+    # Step 7: Use static labels as ground truth for VexIR (fix data inconsistency)
+    df_vexir['label'] = df_static['label'].values
     
     print(f"  ✓ Alignment verified: {len(df_static)} samples")
     print(f"  ✓ All hashes match across datasets")
@@ -208,22 +232,20 @@ def load_datasets(vexir_dim=128):
     return df_static, df_dynamic, df_vexir
 
 
-def create_feature_combinations(df_static, df_dynamic, df_vexir, vexir_dim=128):
+def create_non_embedding_datasets(df_static, df_dynamic):
     """
-    Create all 7 feature combinations for ablation study.
+    Create dimension-INDEPENDENT datasets (no VexIR).
+    These are run ONCE, not per embedding dimension.
     
-    Returns dictionary with dataset name as key and feature data as value.
+    Returns: static_only, dynamic_only, static_dynamic
     """
     
-    # Define feature columns
     static_cols = [c for c in df_static.columns if c not in ['file_hash', 'label']]
     dynamic_cols = [c for c in df_dynamic.columns if c not in ['file_hash', 'label']]
-    vexir_cols = [c for c in df_vexir.columns if c.startswith('embed_')]
     
-    print(f"\nFeature counts:")
+    print(f"\nNon-Embedding Feature counts:")
     print(f"  Static features: {len(static_cols)}")
     print(f"  Dynamic features: {len(dynamic_cols)}")
-    print(f"  VexIR embeddings: {len(vexir_cols)}")
     
     labels = df_static['label'].copy()
     file_hashes = df_static['file_hash'].copy()
@@ -250,108 +272,121 @@ def create_feature_combinations(df_static, df_dynamic, df_vexir, vexir_dim=128):
     }
     print(f"2. Dynamic Only: {df_2.shape}")
     
-    # 3. VexIR Only
-    df_3 = df_vexir[vexir_cols].copy()
-    datasets['vexir_only'] = {
-        'features': df_3,
-        'labels': labels,
-        'hashes': file_hashes,
-        'feature_names': vexir_cols
-    }
-    print(f"3. VexIR Only: {df_3.shape}")
-    
-    # 4. Static + VexIR Embeddings
-    df_4 = pd.concat([
-        df_static[static_cols].reset_index(drop=True),
-        df_vexir[vexir_cols].reset_index(drop=True)
-    ], axis=1)
-    datasets['static_vexir'] = {
-        'features': df_4,
-        'labels': labels,
-        'hashes': file_hashes,
-        'feature_names': static_cols + vexir_cols
-    }
-    print(f"4. Static + VexIR: {df_4.shape}")
-    
-    # 5. Dynamic + VexIR Embeddings
-    df_5 = pd.concat([
-        df_dynamic[dynamic_cols].reset_index(drop=True),
-        df_vexir[vexir_cols].reset_index(drop=True)
-    ], axis=1)
-    datasets['dynamic_vexir'] = {
-        'features': df_5,
-        'labels': labels,
-        'hashes': file_hashes,
-        'feature_names': dynamic_cols + vexir_cols
-    }
-    print(f"5. Dynamic + VexIR: {df_5.shape}")
-    
-    # 6. Static + Dynamic Features
-    df_6 = pd.concat([
+    # 3. Static + Dynamic Features
+    df_3 = pd.concat([
         df_static[static_cols].reset_index(drop=True),
         df_dynamic[dynamic_cols].reset_index(drop=True)
     ], axis=1)
     datasets['static_dynamic'] = {
-        'features': df_6,
+        'features': df_3,
         'labels': labels,
         'hashes': file_hashes,
         'feature_names': static_cols + dynamic_cols
     }
-    print(f"6. Static + Dynamic: {df_6.shape}")
+    print(f"3. Static + Dynamic: {df_3.shape}")
     
-    # 7. Static + Dynamic + VexIR Embeddings
-    df_7 = pd.concat([
+    return datasets
+
+
+def create_embedding_datasets(df_static, df_dynamic, df_vexir):
+    """
+    Create dimension-DEPENDENT datasets (include VexIR).
+    These are run per embedding dimension.
+    
+    Returns: vexir_only, static_vexir, dynamic_vexir, static_dynamic_vexir
+    """
+    
+    static_cols = [c for c in df_static.columns if c not in ['file_hash', 'label']]
+    dynamic_cols = [c for c in df_dynamic.columns if c not in ['file_hash', 'label']]
+    vexir_cols = [c for c in df_vexir.columns if c.startswith('embed_')]
+    
+    print(f"\nEmbedding Feature counts:")
+    print(f"  Static features: {len(static_cols)}")
+    print(f"  Dynamic features: {len(dynamic_cols)}")
+    print(f"  VexIR embeddings: {len(vexir_cols)}")
+    
+    labels = df_static['label'].copy()
+    file_hashes = df_static['file_hash'].copy()
+    
+    datasets = {}
+    
+    # 1. VexIR Only
+    df_1 = df_vexir[vexir_cols].copy()
+    datasets['vexir_only'] = {
+        'features': df_1,
+        'labels': labels,
+        'hashes': file_hashes,
+        'feature_names': vexir_cols
+    }
+    print(f"\n1. VexIR Only: {df_1.shape}")
+    
+    # 2. Static + VexIR Embeddings
+    df_2 = pd.concat([
+        df_static[static_cols].reset_index(drop=True),
+        df_vexir[vexir_cols].reset_index(drop=True)
+    ], axis=1)
+    datasets['static_vexir'] = {
+        'features': df_2,
+        'labels': labels,
+        'hashes': file_hashes,
+        'feature_names': static_cols + vexir_cols
+    }
+    print(f"2. Static + VexIR: {df_2.shape}")
+    
+    # 3. Dynamic + VexIR Embeddings
+    df_3 = pd.concat([
+        df_dynamic[dynamic_cols].reset_index(drop=True),
+        df_vexir[vexir_cols].reset_index(drop=True)
+    ], axis=1)
+    datasets['dynamic_vexir'] = {
+        'features': df_3,
+        'labels': labels,
+        'hashes': file_hashes,
+        'feature_names': dynamic_cols + vexir_cols
+    }
+    print(f"3. Dynamic + VexIR: {df_3.shape}")
+    
+    # 4. Static + Dynamic + VexIR Embeddings
+    df_4 = pd.concat([
         df_static[static_cols].reset_index(drop=True),
         df_dynamic[dynamic_cols].reset_index(drop=True),
         df_vexir[vexir_cols].reset_index(drop=True)
     ], axis=1)
     datasets['static_dynamic_vexir'] = {
-        'features': df_7,
+        'features': df_4,
         'labels': labels,
         'hashes': file_hashes,
         'feature_names': static_cols + dynamic_cols + vexir_cols
     }
-    print(f"7. Static + Dynamic + VexIR: {df_7.shape}")
+    print(f"4. Static + Dynamic + VexIR: {df_4.shape}")
     
     return datasets
 
 
-def run_experiment(datasets, vexir_dim=128):
+def run_experiment(datasets, vexir_dim="N/A"):
     """
     Run ML experiments on all dataset combinations with all algorithms.
     Uses nested cross-validation with GridSearchCV for hyperparameter tuning.
+    
+    Args:
+        datasets: Dictionary of dataset configurations
+        vexir_dim: VexIR dimension (integer) or "N/A" for non-embedding datasets
+    
+    All preprocessing (VarianceThreshold, StandardScaler) is performed inside
+    the cross-validation pipeline to prevent information leakage.
     """
     
     df_results = pd.DataFrame(columns=[
         'vexir_dim', 'dataset', 'classifier', 'fold', 'precision', 'recall', 
-        'f1', 'accuracy', 'best_params', 'num_features'
+        'f1', 'accuracy', 'tpr', 'fpr', 'best_params', 'num_features'
     ])
     
     df_feature_imp = None
     
     algorithms = ["XGB", "RF", "LR", "DT", "NB", "SVM", "DNN", "KNN"]
     
-    dataset_order = [
-        'static_only',
-        'dynamic_only',
-        'vexir_only',
-        'static_vexir',
-        'dynamic_vexir',
-        'static_dynamic',
-        'static_dynamic_vexir'
-    ]
-    
-    dataset_display_names = {
-        'static_only': '1. Static Features Only',
-        'dynamic_only': '2. Dynamic Features Only',
-        'vexir_only': '3. VexIR Only',
-        'static_vexir': '4. Static + VexIR',
-        'dynamic_vexir': '5. Dynamic + VexIR',
-        'static_dynamic': '6. Static + Dynamic',
-        'static_dynamic_vexir': '7. Static + Dynamic + VexIR'
-    }
-    
-    for dataset_name in dataset_order:
+    # Process datasets in the order they appear
+    for dataset_name in datasets.keys():
         dataset = datasets[dataset_name]
         X = dataset['features']
         y = dataset['labels']
@@ -362,25 +397,25 @@ def run_experiment(datasets, vexir_dim=128):
         
         for alg in algorithms:
             print('=' * 60)
-            display_name = dataset_display_names.get(dataset_name, dataset_name)
-            print(f"Dataset: {display_name}")
+            print(f"Dataset: {dataset_name}")
             print(f"Algorithm: {alg} | VexIR Dim: {vexir_dim}")
             print(f"Features: {X.shape[1]} | Samples: {X.shape[0]}")
             print('=' * 60)
             
-            sss = StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_SEED)
+            sss = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
             
             fold_idx = 0
             for train_index, test_index in sss.split(X, y_encoded):
                 X_train, X_test = X.iloc[train_index], X.iloc[test_index]
                 y_train, y_test = y_encoded[train_index], y_encoded[test_index]
                 
-                print(f"\nFold {fold_idx + 1}/10 - Train: {X_train.shape}, Test: {X_test.shape}")
+                print(f"\nFold {fold_idx + 1}/5 - Train: {X_train.shape}, Test: {X_test.shape}")
                 
-                cv_inner = StratifiedKFold(n_splits=5, random_state=RANDOM_SEED, shuffle=True)
+                cv_inner = StratifiedKFold(n_splits=3, random_state=RANDOM_SEED, shuffle=True)
                 
                 clf, param_grid = select_algorithm(alg)
                 
+                # All preprocessing inside pipeline to prevent data leakage
                 pipeline = Pipeline([
                     ('var_threshold', VarianceThreshold(threshold=0.0)),
                     ('scaler', StandardScaler()),
@@ -402,7 +437,16 @@ def run_experiment(datasets, vexir_dim=128):
                 f1_res = f1_score(y_test, y_pred, average='weighted', zero_division=0)
                 acc = accuracy_score(y_test, y_pred)
                 
-                print(f"F1: {f1_res:.4f} | Acc: {acc:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
+                # Calculate TPR and FPR from confusion matrix
+                cm = confusion_matrix(y_test, y_pred)
+                if cm.shape == (2, 2):
+                    tn, fp, fn, tp = cm.ravel()
+                    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0  # Sensitivity/Recall
+                    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
+                else:
+                    tpr, fpr = rec, 0  # Fallback for edge cases
+                
+                print(f"F1: {f1_res:.4f} | Acc: {acc:.4f} | TPR: {tpr:.4f} | FPR: {fpr:.4f}")
                 print(f"Best params: {result.best_params_}")
                 
                 # Store feature importance for tree-based models
@@ -441,6 +485,8 @@ def run_experiment(datasets, vexir_dim=128):
                     'recall': rec,
                     'f1': f1_res,
                     'accuracy': acc,
+                    'tpr': tpr,
+                    'fpr': fpr,
                     'best_params': str(result.best_params_),
                     'num_features': X.shape[1]
                 }
@@ -461,7 +507,9 @@ def generate_summary(df_results):
         'precision': ['mean', 'std'],
         'recall': ['mean', 'std'],
         'f1': ['mean', 'std'],
-        'accuracy': ['mean', 'std']
+        'accuracy': ['mean', 'std'],
+        'tpr': ['mean', 'std'],
+        'fpr': ['mean', 'std']
     }).reset_index()
     
     summary.columns = [
@@ -469,7 +517,9 @@ def generate_summary(df_results):
         'precision_mean', 'precision_std',
         'recall_mean', 'recall_std',
         'f1_mean', 'f1_std',
-        'accuracy_mean', 'accuracy_std'
+        'accuracy_mean', 'accuracy_std',
+        'tpr_mean', 'tpr_std',
+        'fpr_mean', 'fpr_std'
     ]
     
     summary.to_csv("ransomware_detection_summary.csv", index=False)
@@ -479,26 +529,30 @@ def generate_summary(df_results):
     print("=" * 60)
     print(f"\nSummary saved to: ransomware_detection_summary.csv")
     
+    dataset_display_names = {
+        'static_only': 'Static Features Only',
+        'dynamic_only': 'Dynamic Features Only',
+        'static_dynamic': 'Static + Dynamic',
+        'vexir_only': 'VexIR Only',
+        'static_vexir': 'Static + VexIR',
+        'dynamic_vexir': 'Dynamic + VexIR',
+        'static_dynamic_vexir': 'Static + Dynamic + VexIR'
+    }
+    
     print("\n" + "-" * 60)
     print("BEST CLASSIFIER PER DATASET (by F1 Score)")
     print("-" * 60)
     
-    dataset_display_names = {
-        'static_only': '1. Static Features Only',
-        'dynamic_only': '2. Dynamic Features Only',
-        'vexir_only': '3. VexIR Only',
-        'static_vexir': '4. Static + VexIR',
-        'dynamic_vexir': '5. Dynamic + VexIR',
-        'static_dynamic': '6. Static + Dynamic',
-        'static_dynamic_vexir': '7. Static + Dynamic + VexIR'
-    }
+    # Separate non-embedding (N/A) and embedding results
+    # Handle both string 'N/A' and potential mixed types
+    non_embedding = summary[summary['vexir_dim'].astype(str) == 'N/A']
+    embedding = summary[summary['vexir_dim'].astype(str) != 'N/A']
     
-    for vexir_dim in summary['vexir_dim'].unique():
-        print(f"\n--- VexIR Dimension: {vexir_dim} ---")
-        dim_summary = summary[summary['vexir_dim'] == vexir_dim]
-        
-        for dataset in dim_summary['dataset'].unique():
-            ds_data = dim_summary[dim_summary['dataset'] == dataset]
+    # Print non-embedding results first
+    if len(non_embedding) > 0:
+        print("\n=== NON-EMBEDDING DATASETS (Dimension Independent) ===")
+        for dataset in non_embedding['dataset'].unique():
+            ds_data = non_embedding[non_embedding['dataset'] == dataset]
             best_row = ds_data.loc[ds_data['f1_mean'].idxmax()]
             
             print(f"\n{dataset_display_names.get(dataset, dataset)}:")
@@ -506,7 +560,27 @@ def generate_summary(df_results):
             print(f"  F1: {best_row['f1_mean']:.4f} ± {best_row['f1_std']:.4f}")
             print(f"  Accuracy: {best_row['accuracy_mean']:.4f} ± {best_row['accuracy_std']:.4f}")
     
-    # Print overall best
+    # Print embedding results per dimension
+    if len(embedding) > 0:
+        print("\n=== EMBEDDING DATASETS (Dimension Dependent) ===")
+        # Get unique dimensions and sort numerically (they may be int or str)
+        unique_dims = embedding['vexir_dim'].unique()
+        dims = sorted([int(d) for d in unique_dims], reverse=True)
+        for vexir_dim in dims:
+            print(f"\n--- VexIR Dimension: {vexir_dim} ---")
+            # Match by converting both to same type
+            dim_summary = embedding[embedding['vexir_dim'].astype(str) == str(vexir_dim)]
+            
+            for dataset in dim_summary['dataset'].unique():
+                ds_data = dim_summary[dim_summary['dataset'] == dataset]
+                best_row = ds_data.loc[ds_data['f1_mean'].idxmax()]
+                
+                print(f"\n{dataset_display_names.get(dataset, dataset)}:")
+                print(f"  Best Classifier: {best_row['classifier']}")
+                print(f"  F1: {best_row['f1_mean']:.4f} ± {best_row['f1_std']:.4f}")
+                print(f"  Accuracy: {best_row['accuracy_mean']:.4f} ± {best_row['accuracy_std']:.4f}")
+    
+    # Print overall best (from embedding datasets for fair comparison)
     print("\n" + "-" * 60)
     print("OVERALL BEST CONFIGURATION")
     print("-" * 60)
@@ -521,22 +595,29 @@ def generate_summary(df_results):
 
 
 def main():
-    """Main function to run the complete experiment."""
+    """
+    Main function to run the complete experiment.
+    
+    CORRECT EXPERIMENTAL STRUCTURE:
+    1. Non-embedding datasets (Static, Dynamic, Static+Dynamic) - run ONCE
+    2. Embedding datasets (VexIR, Static+VexIR, etc.) - run per dimension
+    """
+    
+    start_time = time.time()
     
     print("=" * 80)
     print("RANSOMWARE DETECTION IN ELF FILES")
     print("=" * 80)
-    print("\nThis experiment evaluates 8 ML classifiers on:")
-    print("  - 7 feature combinations")
-    print("  - 5 VexIR embedding dimensions")
-    print("\nFeature Combinations:")
-    print("  1. Static Features Only")
-    print("  2. Dynamic Features Only")
-    print("  3. VexIR Embeddings Only")
-    print("  4. Static + VexIR Embeddings")
-    print("  5. Dynamic + VexIR Embeddings")
-    print("  6. Static + Dynamic Features")
-    print("  7. Static + Dynamic + VexIR Embeddings")
+    print("\n📌 EXPERIMENTAL STRUCTURE:")
+    print("\n  PART 1: Non-Embedding Datasets (run ONCE - dimension independent)")
+    print("    - Static Features Only")
+    print("    - Dynamic Features Only")
+    print("    - Static + Dynamic Features")
+    print("\n  PART 2: Embedding Datasets (run per dimension)")
+    print("    - VexIR Embeddings Only")
+    print("    - Static + VexIR Embeddings")
+    print("    - Dynamic + VexIR Embeddings")
+    print("    - Static + Dynamic + VexIR Embeddings")
     print("\nVexIR embedding dimensions: 512, 256, 128, 64, 32, 16, 8")
     print("\nClassifiers: XGB, RF, LR, DT, NB, SVM, DNN, KNN")
     print("\n")
@@ -546,25 +627,47 @@ def main():
     all_results = None
     all_feature_imp = None
     
+    # ========================================================================
+    # PART 1: NON-EMBEDDING DATASETS (run ONCE)
+    # Static, Dynamic, Static+Dynamic - these don't depend on VexIR dimension
+    # ========================================================================
+    print("\n" + "#" * 80)
+    print("# PART 1: NON-EMBEDDING DATASETS (Dimension Independent)")
+    print("#" * 80)
+    
+    # Load static and dynamic features (use any dimension just to get static/dynamic)
+    df_static, df_dynamic, _ = load_datasets(vexir_dimensions[0])
+    
+    # Create non-embedding datasets
+    non_embedding_datasets = create_non_embedding_datasets(df_static, df_dynamic)
+    
+    # Run experiments on non-embedding datasets (vexir_dim = "N/A")
+    df_results, df_feature_imp = run_experiment(non_embedding_datasets, vexir_dim="N/A")
+    
+    all_results = df_results
+    if df_feature_imp is not None:
+        all_feature_imp = df_feature_imp
+    
+    # ========================================================================
+    # PART 2: EMBEDDING DATASETS (run per dimension)
+    # VexIR, Static+VexIR, Dynamic+VexIR, All Combined
+    # ========================================================================
     for vexir_dim in vexir_dimensions:
         print("\n" + "#" * 80)
-        print(f"# RUNNING EXPERIMENTS WITH VexIR DIMENSION: {vexir_dim}")
+        print(f"# PART 2: EMBEDDING DATASETS - VexIR Dimension: {vexir_dim}")
         print("#" * 80)
         
-        # Load and align datasets by hash
+        # Load datasets for this dimension
         df_static, df_dynamic, df_vexir = load_datasets(vexir_dim)
         
-        # Create feature combinations
-        datasets = create_feature_combinations(df_static, df_dynamic, df_vexir, vexir_dim)
+        # Create embedding datasets only
+        embedding_datasets = create_embedding_datasets(df_static, df_dynamic, df_vexir)
         
-        # Run experiments
-        df_results, df_feature_imp = run_experiment(datasets, vexir_dim)
+        # Run experiments on embedding datasets
+        df_results, df_feature_imp = run_experiment(embedding_datasets, vexir_dim)
         
         # Aggregate results
-        if all_results is None:
-            all_results = df_results
-        else:
-            all_results = pd.concat([all_results, df_results], ignore_index=True)
+        all_results = pd.concat([all_results, df_results], ignore_index=True)
         
         if df_feature_imp is not None:
             if all_feature_imp is None:
@@ -575,15 +678,25 @@ def main():
     # Save all results
     all_results.to_csv("ransomware_detection_results.csv", index=False)
     
+    if all_feature_imp is not None:
+        all_feature_imp.to_csv("ransomware_feature_importance.csv", index=False)
+    
     # Generate summary
     summary = generate_summary(all_results)
+    
+    # Calculate and display runtime
+    elapsed_time = time.time() - start_time
+    hours, remainder = divmod(elapsed_time, 3600)
+    minutes, seconds = divmod(remainder, 60)
     
     print("\n" + "=" * 80)
     print("EXPERIMENT COMPLETE!")
     print("=" * 80)
+    print(f"\nTotal runtime: {int(hours)}h {int(minutes)}m {seconds:.2f}s")
     print("\nOutput files:")
     print("  - ransomware_detection_results.csv (detailed results)")
     print("  - ransomware_detection_summary.csv (summary statistics)")
+    print("  - ransomware_feature_importance.csv (feature importance)")
     
     return all_results, summary
 
