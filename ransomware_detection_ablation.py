@@ -14,7 +14,7 @@ This script performs ransomware detection using various combinations of:
 6. Static + Dynamic features
 7. Static + Dynamic + VexIR embeddings
 
-Each combination is evaluated with VexIR embeddings of dimensions: 512, 256, 128, 64, 32, 16, 8
+Each combination is evaluated with VexIR embeddings of dimensions: 1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 32, 24, 16, 8, 4
 
 Dataset Alignment:
 - All datasets are explicitly aligned by file_hash column
@@ -47,7 +47,7 @@ from sklearn.neural_network import MLPClassifier
 from xgboost import XGBClassifier
 
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+    accuracy_score, precision_score, recall_score, f1_score
 )
 
 # Suppress only specific warnings (convergence, etc.)
@@ -100,6 +100,7 @@ def select_algorithm(algorithm):
         'clf__min_child_weight': [1, 3]
     }
 
+    # Naive Bayes has no hyperparameters to tune
     param_grid_nb = {}
 
     param_grid_svc = {
@@ -159,7 +160,7 @@ def load_datasets(vexir_dim=128):
     4. Verifies alignment with assertions
     
     Args:
-        vexir_dim: Dimension of VexIR embeddings (512, 256, 128, 64, 32, 16, or 8)
+        vexir_dim: Dimension of VexIR embeddings (1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 32, 24, 16, 8, or 4)
     
     Returns:
         df_static: Static features DataFrame (aligned)
@@ -212,17 +213,12 @@ def load_datasets(vexir_dim=128):
     assert all(df_static['file_hash'] == df_vexir['file_hash']), \
         "Static and VexIR file_hash mismatch after alignment!"
     
-    # Step 5: Normalize labels to consistent format (numeric: 0=benign, 1=ransomware)
-    label_map = {'benign': 0, 'ransomware': 1, 0: 0, 1: 1}
-    df_static['label'] = df_static['label'].map(lambda x: label_map.get(x, x))
-    df_dynamic['label'] = df_dynamic['label'].map(lambda x: label_map.get(x, x))
-    
-    # Step 6: Verify labels match between static and dynamic
+    # Step 5: Verify labels match across datasets
     assert all(df_static['label'] == df_dynamic['label']), \
         "Labels mismatch between Static and Dynamic datasets!"
     
-    # Step 7: Use static labels as ground truth for VexIR (fix data inconsistency)
-    df_vexir['label'] = df_static['label'].values
+    assert all(df_static['label'] == df_vexir['label']), \
+        "Labels mismatch between Static and VexIR datasets!"
     
     print(f"  ✓ Alignment verified: {len(df_static)} samples")
     print(f"  ✓ All hashes match across datasets")
@@ -298,7 +294,7 @@ def create_embedding_datasets(df_static, df_dynamic, df_vexir):
     
     static_cols = [c for c in df_static.columns if c not in ['file_hash', 'label']]
     dynamic_cols = [c for c in df_dynamic.columns if c not in ['file_hash', 'label']]
-    vexir_cols = [c for c in df_vexir.columns if c.startswith('embed_')]
+    vexir_cols = [c for c in df_vexir.columns if c.startswith('vexir_') or c.startswith('embed_')]
     
     print(f"\nEmbedding Feature counts:")
     print(f"  Static features: {len(static_cols)}")
@@ -378,7 +374,7 @@ def run_experiment(datasets, vexir_dim="N/A"):
     
     df_results = pd.DataFrame(columns=[
         'vexir_dim', 'dataset', 'classifier', 'fold', 'precision', 'recall', 
-        'f1', 'accuracy', 'tpr', 'fpr', 'best_params', 'num_features'
+        'f1', 'accuracy', 'best_params', 'num_features'
     ])
     
     df_feature_imp = None
@@ -437,16 +433,7 @@ def run_experiment(datasets, vexir_dim="N/A"):
                 f1_res = f1_score(y_test, y_pred, average='weighted', zero_division=0)
                 acc = accuracy_score(y_test, y_pred)
                 
-                # Calculate TPR and FPR from confusion matrix
-                cm = confusion_matrix(y_test, y_pred)
-                if cm.shape == (2, 2):
-                    tn, fp, fn, tp = cm.ravel()
-                    tpr = tp / (tp + fn) if (tp + fn) > 0 else 0  # Sensitivity/Recall
-                    fpr = fp / (fp + tn) if (fp + tn) > 0 else 0  # False Positive Rate
-                else:
-                    tpr, fpr = rec, 0  # Fallback for edge cases
-                
-                print(f"F1: {f1_res:.4f} | Acc: {acc:.4f} | TPR: {tpr:.4f} | FPR: {fpr:.4f}")
+                print(f"F1: {f1_res:.4f} | Acc: {acc:.4f} | Prec: {prec:.4f} | Rec: {rec:.4f}")
                 print(f"Best params: {result.best_params_}")
                 
                 # Store feature importance for tree-based models
@@ -485,8 +472,6 @@ def run_experiment(datasets, vexir_dim="N/A"):
                     'recall': rec,
                     'f1': f1_res,
                     'accuracy': acc,
-                    'tpr': tpr,
-                    'fpr': fpr,
                     'best_params': str(result.best_params_),
                     'num_features': X.shape[1]
                 }
@@ -507,9 +492,7 @@ def generate_summary(df_results):
         'precision': ['mean', 'std'],
         'recall': ['mean', 'std'],
         'f1': ['mean', 'std'],
-        'accuracy': ['mean', 'std'],
-        'tpr': ['mean', 'std'],
-        'fpr': ['mean', 'std']
+        'accuracy': ['mean', 'std']
     }).reset_index()
     
     summary.columns = [
@@ -517,9 +500,7 @@ def generate_summary(df_results):
         'precision_mean', 'precision_std',
         'recall_mean', 'recall_std',
         'f1_mean', 'f1_std',
-        'accuracy_mean', 'accuracy_std',
-        'tpr_mean', 'tpr_std',
-        'fpr_mean', 'fpr_std'
+        'accuracy_mean', 'accuracy_std'
     ]
     
     summary.to_csv("ransomware_detection_summary.csv", index=False)
@@ -618,11 +599,11 @@ def main():
     print("    - Static + VexIR Embeddings")
     print("    - Dynamic + VexIR Embeddings")
     print("    - Static + Dynamic + VexIR Embeddings")
-    print("\nVexIR embedding dimensions: 512, 256, 128, 64, 32, 16, 8")
+    print("\nVexIR embedding dimensions: 1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 32, 24, 16, 8, 4")
     print("\nClassifiers: XGB, RF, LR, DT, NB, SVM, DNN, KNN")
     print("\n")
     
-    vexir_dimensions = [512, 256, 128, 64, 32, 16, 8]
+    vexir_dimensions = [1024, 768, 512, 384, 256, 192, 128, 96, 64, 48, 32, 24, 16, 8, 4]
     
     all_results = None
     all_feature_imp = None
